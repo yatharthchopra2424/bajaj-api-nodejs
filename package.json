@@ -3,7 +3,8 @@
   "private": true,
   "version": "0.0.0",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "build": "echo 'Build script for Vercel'"
   },
   "dependencies": {
     "@huggingface/inference": "^2.8.1",
