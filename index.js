@@ -98,13 +98,24 @@ const getDocumentHash = (url) => {
 
 // === API Endpoints ===
 app.get("/api", (req, res) => {
-    res.json({ status: "ok", message: "Welcome to the Policy Q&A API!" });
+    res.json({
+        status: "ok",
+        message: "Welcome to the Policy Q&A API!",
+        endpoints: {
+            process: "POST /api/hackrx/process-document",
+            query: "POST /api/hackrx/query"
+        }
+    });
 });
 
-app.post("/api/hackrx/run", async (req, res) => {
-    const { documents: docUrl, questions } = req.body;
-    let pdfPath = null;
+// Endpoint to process and index a document. This is a long-running task.
+app.post("/api/hackrx/process-document", async (req, res) => {
+    const { docUrl } = req.body;
+    if (!docUrl) {
+        return res.status(400).json({ detail: "Missing 'docUrl' in request body." });
+    }
 
+    let pdfPath = null;
     try {
         const docHash = getDocumentHash(docUrl);
         logger.info(`Processing request for document hash: ${docHash}`);
@@ -114,40 +125,73 @@ app.post("/api/hackrx/run", async (req, res) => {
         }
 
         const stats = await pineconeIndex.describeIndexStats();
-        if (!stats.namespaces[docHash]) {
-            logger.info(`Document not found in Pinecone. Processing and indexing: ${docUrl}`);
-
-            const response = await axios.get(docUrl, { responseType: 'arraybuffer' });
-            if (!response.headers['content-type'].startsWith("application/pdf")) {
-                return res.status(400).json({ detail: "Invalid content type. URL must point to a PDF." });
-            }
-
-            const tmpFile = tmp.fileSync({ suffix: ".pdf" });
-            pdfPath = tmpFile.name;
-            fs.writeFileSync(pdfPath, response.data);
-
-            const { PDFLoader } = require("langchain/document_loaders/fs/pdf");
-            const loader = new PDFLoader(pdfPath);
-            const documents = await loader.load();
-            const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 150 });
-            const chunks = await splitter.splitDocuments(documents);
-
-            logger.info(`Loaded and split into ${chunks.length} chunks. Creating embeddings...`);
-            const embeddingModel = await getEmbeddingModel();
-
-            await PineconeStore.fromDocuments(chunks, embeddingModel, {
-                pineconeIndex,
-                namespace: docHash,
-                maxConcurrency: 5,
-            });
-
-
-            logger.info("Indexing complete.");
-        } else {
-            logger.info(`Document already processed. Using existing vectors from namespace: ${docHash}`);
+        if (stats.namespaces && stats.namespaces[docHash]) {
+            logger.info(`Document hash ${docHash} already exists. Skipping processing.`);
+            return res.status(200).json({ message: "Document already processed." });
         }
 
-        // === QA Chain Execution ===
+        logger.info(`Document not found in Pinecone. Processing and indexing: ${docUrl}`);
+        const response = await axios.get(docUrl, { responseType: 'arraybuffer' });
+        if (!response.headers['content-type'].startsWith("application/pdf")) {
+            return res.status(400).json({ detail: "Invalid content type. URL must point to a PDF." });
+        }
+
+        const tmpFile = tmp.fileSync({ suffix: ".pdf" });
+        pdfPath = tmpFile.name;
+        fs.writeFileSync(pdfPath, response.data);
+
+        const { PDFLoader } = require("langchain/document_loaders/fs/pdf");
+        const loader = new PDFLoader(pdfPath);
+        const documents = await loader.load();
+        const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 150 });
+        const chunks = await splitter.splitDocuments(documents);
+
+        logger.info(`Loaded and split into ${chunks.length} chunks. Creating embeddings...`);
+        const embeddingModel = await getEmbeddingModel();
+
+        await PineconeStore.fromDocuments(chunks, embeddingModel, {
+            pineconeIndex,
+            namespace: docHash,
+            maxConcurrency: 5,
+        });
+
+        logger.info("Indexing complete.");
+        res.status(201).json({ message: "Document processed and indexed successfully.", docHash });
+
+    } catch (error) {
+        logger.error(`An unexpected error occurred during document processing: ${error.message}`, error);
+        res.status(500).json({ detail: `An internal server error occurred: ${error.message}` });
+    } finally {
+        if (pdfPath) {
+            fs.unlinkSync(pdfPath);
+            logger.info("Temporary PDF file cleaned up.");
+        }
+    }
+});
+
+
+// Endpoint to ask questions about a pre-processed document.
+app.post("/api/hackrx/query", async (req, res) => {
+    const { docUrl, questions } = req.body;
+    if (!docUrl || !questions || !Array.isArray(questions)) {
+        return res.status(400).json({ detail: "Request body must include 'docUrl' and an array of 'questions'." });
+    }
+
+    try {
+        const docHash = getDocumentHash(docUrl);
+        logger.info(`Querying document hash: ${docHash}`);
+
+        if (!pineconeIndex) {
+            return res.status(500).json({ detail: "Pinecone is not configured." });
+        }
+
+        const stats = await pineconeIndex.describeIndexStats();
+        if (!stats.namespaces || !stats.namespaces[docHash]) {
+            return res.status(404).json({
+                detail: "Document not found. Please process it first via the /api/hackrx/process-document endpoint."
+            });
+        }
+
         const qaChain = loadQAStuffChain(llm, "stuff", { prompt: qaPrompt });
         const answerList = [];
         const embeddingModel = await getEmbeddingModel();
@@ -156,10 +200,8 @@ app.post("/api/hackrx/run", async (req, res) => {
             namespace: docHash,
         });
 
-
         for (const q of questions) {
             logger.info(`Answering question: ${q}`);
-
             const relevantDocs = await vectorStore.similaritySearch(q, 5);
 
             if (relevantDocs.length === 0) {
@@ -169,7 +211,6 @@ app.post("/api/hackrx/run", async (req, res) => {
             }
 
             const result = await qaChain.invoke({ input_documents: relevantDocs, question: q });
-            console.log("Result from QA Chain:", result);
             answerList.push(result.text.trim());
         }
 
@@ -177,13 +218,8 @@ app.post("/api/hackrx/run", async (req, res) => {
         res.json({ answers: answerList });
 
     } catch (error) {
-        logger.error(`An unexpected error occurred: ${error.message}`, error);
+        logger.error(`An unexpected error occurred during query: ${error.message}`, error);
         res.status(500).json({ detail: `An internal server error occurred: ${error.message}` });
-    } finally {
-        if (pdfPath) {
-            fs.unlinkSync(pdfPath);
-            logger.info("Temporary PDF file cleaned up.");
-        }
     }
 });
 
