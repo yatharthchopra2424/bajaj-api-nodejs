@@ -97,11 +97,11 @@ const getDocumentHash = (url) => {
 };
 
 // === API Endpoints ===
-app.get("/", (req, res) => {
+app.get("/api", (req, res) => {
     res.json({ status: "ok", message: "Welcome to the Policy Q&A API!" });
 });
 
-app.post("/hackrx/run", async (req, res) => {
+app.post("/api/hackrx/run", async (req, res) => {
     const { documents: docUrl, questions } = req.body;
     let pdfPath = null;
 
@@ -191,3 +191,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     logger.info(`Server is running on port ${PORT}`);
 });
+
+module.exports = app;
