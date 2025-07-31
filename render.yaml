@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: bajaj-gemini-app
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: HUGGING_FACE_API_KEY
+        sync: false
