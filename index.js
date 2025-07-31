@@ -11,7 +11,7 @@ const { RecursiveCharacterTextSplitter } = require('langchain/text_splitter');
 const { loadQAStuffChain } = require('langchain/chains');
 const { PromptTemplate } = require('@langchain/core/prompts');
 const { PineconeStore } = require('@langchain/pinecone');
-require('dotenv').config({ path: './backend/.env' });
+require('dotenv').config();
 
 // === Environment Setup ===
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY;
